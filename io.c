@@ -116,14 +116,14 @@ void *execFunc(void *arg)
     while(readCount)
     {
         uint64_t offset = SEC_TO_BYTES(randomNumber(0, BYTES_TO_SEC(DISK_SIZE_BYTES)));
-        diskWrite(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
+        diskRead(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
         readCount--;
     }
 
     while(writeCount)
     {
         uint64_t offset = SEC_TO_BYTES(randomNumber(0, BYTES_TO_SEC(DISK_SIZE_BYTES)));
-        diskRead(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
+        diskWrite(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
         writeCount--;
     }
 
