@@ -11,118 +11,190 @@
 #include <errno.h>
 #include <string.h>
 #include <malloc.h>
+#include <assert.h>
 
-#define KB				(1024)
-#define MB				(1024 * KB)
-#define GB				(1024 * MB)
+#define KB                  (1024)
+#define MB                  (1024 * KB)
+#define GB                  (1024 * MB)
 
-#define DISK_PATH		("/dev/xvdl")
-#define NUM_THREADS		(8)
-#define DISK_SIZE_BYTES	(5ULL * GB)
-#define BYTES_TO_SEC(b)	(b / 512)
-#define IO_SIZE_SEC		(1)
-#define SEC_TO_BYTES(s) (s * 512)
-#define NUM_IO_PER_THREAD	(1000)
+#define DISK_PATH           ("/dev/xvdl")
+#define DISK_SIZE_BYTES     (5ULL * GB)
+#define DIV_ROUND_UP(n,d)   (((n) + (d) - 1) / (d))
+#define BYTES_TO_SEC(b)     (DIV_ROUND_UP(b, 512))
+#define SEC_TO_BYTES(s)     (s * 512)
+#define NUM_IO_PER_THREAD   (1000)
+#define IO_BUFFER_SIZE      (4 * MB)
 
 struct threadRecord
 {
-	double elapsedTime;
-	uint64_t numIOCompleted;
+    double elapsedTime;
+    uint64_t numIOCompleted;
 };
 
-struct threadRecord threadRecords[NUM_THREADS];
 
-static inline int writeToDisk(int fd, uint64_t offset, uint64_t size, char *buffer)
+struct threadIoCntx
 {
-	//printf("WRITE %lu %lu\n", offset, size);
+    struct threadRecord tr;
+    char *devPath;
+    char *buffer;
+    uint64_t ioSizeSectors;
+    float percentRead;
+};
 
-	ssize_t amnt = pwrite(fd, buffer, size, offset);
+static inline void diskWrite(int fd, uint64_t offset, ssize_t size, char *buffer)
+{
+    //printf("WRITE %lu %lu\n", offset, size);
+    ssize_t amountWritten;
 
-	if(amnt != size)
-	{
-		printf("ERROR WRITE %s %d %ld\n", strerror(errno), fd, amnt);
-	}
+    while(size)
+    {
+        amountWritten = pwrite(fd, buffer, size, offset);
+        assert(amountWritten >= 0);
 
-	return amnt;
+        size -= amountWritten;
+        offset += amountWritten;
+        buffer += amountWritten;
+    }
 }
 
-static inline int openDisk(char *diskPath)
+static inline void diskRead(int fd, uint64_t offset, uint64_t size, char *buffer)
 {
-	//int fd = open(diskPath, O_DIRECT|O_LARGEFILE|O_SYNC|O_RDWR);
-	int fd = open(diskPath, O_LARGEFILE|O_RDWR);
+    //printf("READ(%lu, %lu)\n", offset, size);
+    ssize_t amountRead;
 
-	if(fd < 0)
-	{
-		printf("ERROR OPEN %s\n", strerror(errno));
-	}
+    while(size)
+    {
+        amountRead = pread(fd, buffer, size, offset);
+        assert(amountRead >= 0);
 
-	return fd;
+        size -= amountRead;
+        offset += amountRead;
+        buffer += amountRead;
+    }
+}
+
+
+
+static inline int openDisk(char *devPath)
+{
+    int fd = open(devPath, O_DIRECT|O_LARGEFILE|O_SYNC|O_RDWR);
+
+    if(fd < 0)
+    {
+        printf("ERROR OPEN %s\n", strerror(errno));
+    }
+
+    return fd;
+}
+
+uint64_t getElapsedTimeUS(struct timespec *start, struct timespec *end)
+{
+    return ((end->tv_sec - start->tv_sec) * 1000000) + ((end->tv_nsec - start->tv_nsec) / 1000);
 }
 
 static inline uint64_t randomNumber(uint64_t min, uint64_t max)
 {
-	return (rand() % (max + 1 - min) + min);
+    return (rand() % (max + 1 - min) + min);
 }
 
 void *execFunc(void *arg)
 {
-	struct timeval t1, t2;
-    double elapsedTime;
+    struct timespec t1, t2;
+    struct threadIoCntx *cntx = (struct threadIoCntx *)arg;
+    int readCount = NUM_IO_PER_THREAD * cntx->percentRead;
+    int writeCount = NUM_IO_PER_THREAD - readCount;
 
-	int count = NUM_IO_PER_THREAD;
-	char *buf = pvalloc(SEC_TO_BYTES(IO_SIZE_SEC));
+    //printf("S: %d %d %d\n", readCount, writeCount, NUM_IO_PER_THREAD);
 
-	int fd = openDisk(DISK_PATH);
+    int fd = openDisk(cntx->devPath);
+    assert(fd >= 0);
 
-	srand ( time(NULL) );
+    srand(time(NULL));
+    
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
 
-	gettimeofday(&t1, NULL);
-	
-	while(count)
-	{
-		uint64_t offset = SEC_TO_BYTES(randomNumber(0, BYTES_TO_SEC(DISK_SIZE_BYTES)));
-		writeToDisk(fd, offset, SEC_TO_BYTES(IO_SIZE_SEC), buf);
-		//writeToDisk(fd, 0, 4096, buf);
-		count--;
-	}
+    while(readCount)
+    {
+        uint64_t offset = SEC_TO_BYTES(randomNumber(0, BYTES_TO_SEC(DISK_SIZE_BYTES)));
+        diskWrite(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
+        readCount--;
+    }
 
-	gettimeofday(&t2, NULL);
-	
-	elapsedTime = (t2.tv_sec - t1.tv_sec) * 1000.0;      // sec to ms
-    elapsedTime += (t2.tv_usec - t1.tv_usec) / 1000.0;   // us to ms
-    //printf("elapsedTime: %f ms\n", elapsedTime);
+    while(writeCount)
+    {
+        uint64_t offset = SEC_TO_BYTES(randomNumber(0, BYTES_TO_SEC(DISK_SIZE_BYTES)));
+        diskRead(fd, offset, SEC_TO_BYTES(cntx->ioSizeSectors), cntx->buffer);
+        writeCount--;
+    }
 
-    struct threadRecord *tr = (struct threadRecord *)arg;
-    tr->elapsedTime = elapsedTime;
-    tr->numIOCompleted = NUM_IO_PER_THREAD;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t2);
+    
+    cntx->tr.elapsedTime = (double)getElapsedTimeUS(&t1, &t2);
+    cntx->tr.numIOCompleted = NUM_IO_PER_THREAD;
 
-	close(fd);
-	return NULL;
+    close(fd);
+    return NULL;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-	pthread_t threadIDs[NUM_THREADS];
+    if(argc != 5)
+    {
+        printf("Usage: ./randio <dev Path> <num threads> <io size> <percent read>\n");
+        exit(0);
+    }
 
-	for(int i = 0; i < NUM_THREADS; i++)
-	{
-		pthread_create(&threadIDs[i], NULL, execFunc, (void *)&threadRecords[i]);
-	}
+    char *devPath = argv[1];
+    char *numThreadStr = argv[2];
+    char *ioSizeStr = argv[3];
+    char *percentReadStr = argv[4];
 
-    for (int i = 0; i < NUM_THREADS; i++)
+    /*
+    printf("devPath: %s\n", devPath);
+    printf("numThread: %s | %d\n", numThreadStr, atoi(numThreadStr));
+    printf("ioSize: %s | %lu\n", ioSizeStr, strtoul(ioSizeStr, NULL, 0));
+    printf("percentRead: %s | %f\n", percentReadStr, strtof(percentReadStr, NULL));
+    */
+
+    int numThread = atoi(numThreadStr);
+    uint64_t ioSize = strtoul(ioSizeStr, NULL, 0);
+    float percentRead = strtof(percentReadStr, NULL);
+
+    //make sure buffer size can handle the io size
+    assert(IO_BUFFER_SIZE >= ioSize);
+
+    void *buffer = NULL;
+    int status = posix_memalign(&buffer, 512, IO_BUFFER_SIZE);
+    assert(!status);
+    assert(buffer);
+
+    pthread_t threadIDs[numThread];
+    struct threadIoCntx threadIOContexts[numThread];
+
+    for(int i = 0; i < numThread; i++)
+    {
+        threadIOContexts[i].tr = {0, 0};
+        threadIOContexts[i].devPath = devPath;
+        threadIOContexts[i].buffer = (char *)buffer;
+        threadIOContexts[i].ioSizeSectors = BYTES_TO_SEC(ioSize);
+        threadIOContexts[i].percentRead = percentRead;
+        pthread_create(&threadIDs[i], NULL, execFunc, (void *)&threadIOContexts[i]);
+    }
+
+    for (int i = 0; i < numThread; i++)
        pthread_join(threadIDs[i], NULL);
 
-   	double avgIOPS = 0;
-   	double threadIOPS = 0;
+    double avgIOPS = 0;
+    double threadIOPS = 0;
 
-   	for (int i = 0; i < NUM_THREADS; i++)
-   	{
-   		threadIOPS = ((double)threadRecords[i].numIOCompleted / threadRecords[i].elapsedTime) * 1000;
-   		avgIOPS += threadIOPS;
-   	}
+    for (int i = 0; i < numThread; i++)
+    {
+        threadIOPS = ((double)threadIOContexts[i].tr.numIOCompleted / threadIOContexts[i].tr.elapsedTime) * 1000000;
+        avgIOPS += threadIOPS;
+    }
 
-   	printf("%f", avgIOPS);
-	
-	return 0;
+    printf("%f", avgIOPS);
+    
+    return 0;
 }
 

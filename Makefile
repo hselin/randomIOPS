@@ -1,7 +1,7 @@
-TARGET = prog
+TARGET = randio
 LIBS = -lm -pthread
-CC = gcc
-CFLAGS = -g -Wall -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
+CC = g++
+CFLAGS = -g -Wall -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -std=c++11
 
 .PHONY: default all clean
 
